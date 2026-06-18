@@ -661,6 +661,45 @@ def semanas_bilitool(ig_sem):
     return ig_sem
 
 
+def aplicar_arredondamento_ig_bilitool(ig_sem, ig_dias, modo_arredondamento):
+    """
+    Aplica arredondamento opcional apenas para o parâmetro gestationalWeeks
+    enviado ao BiliTool. Não altera a IG original do prontuário, nem percentil,
+    nem classificação gestacional.
+
+    modo_arredondamento:
+    - "nenhum" -> não arredonda
+    - "6_dias" -> arredonda X+6 para X+1
+    - "5_dias" -> arredonda X+5 e X+6 para X+1
+    """
+    if ig_sem is None:
+        return None, False
+
+    if ig_dias is None:
+        ig_dias = 0
+
+    semana_ajustada = ig_sem
+    arredondou = False
+
+    if modo_arredondamento == "6_dias" and ig_dias >= 6:
+        semana_ajustada = ig_sem + 1
+        arredondou = True
+    elif modo_arredondamento == "5_dias" and ig_dias >= 5:
+        semana_ajustada = ig_sem + 1
+        arredondou = True
+
+    return semana_ajustada, arredondou
+
+
+def semanas_bilitool_ajustada(ig_sem, ig_dias, modo_arredondamento="nenhum"):
+    semana_ajustada, arredondou = aplicar_arredondamento_ig_bilitool(
+        ig_sem=ig_sem,
+        ig_dias=ig_dias,
+        modo_arredondamento=modo_arredondamento,
+    )
+    return semanas_bilitool(semana_ajustada), semana_ajustada, arredondou
+
+
 def bilitool_aplicavel(ig_sem):
     return semanas_bilitool(ig_sem) is not None
 
@@ -918,7 +957,7 @@ st.caption("Extração de dados do prontuário, HV, percentil INTERGROWTH-21st, 
 st.info("BTC é opcional. Sem BTC, o app ainda calcula NC/NF; a decisão 'Coletar?/Foto?' fica em branco porque depende do BTC real.")
 
 
-def montar_item(p, i, btc, data_avaliacao_str, hora_avaliacao):
+def montar_item(p, i, btc, data_avaliacao_str, hora_avaliacao, modo_arredondamento_bilitool="nenhum"):
     faltantes = []
     for campo in ["nome", "data_nasc", "hora_nasc", "ig_sem", "abo_mae", "rh_mae"]:
         if p.get(campo) in [None, ""]:
@@ -945,14 +984,24 @@ def montar_item(p, i, btc, data_avaliacao_str, hora_avaliacao):
     class_ig = classificar_ig(p.get("ig_sem"), p.get("ig_dias"))
     resumo = resumo_rn(p, percentil_txt=percentil_txt, classificacao=classificacao, classe_ig=class_ig)
 
-    ig_sem_bilitool = semanas_bilitool(p["ig_sem"])
+    ig_sem_bilitool, ig_sem_ajustada_bilitool, ig_arredondada_bilitool = semanas_bilitool_ajustada(
+        ig_sem=p["ig_sem"],
+        ig_dias=p.get("ig_dias"),
+        modo_arredondamento=modo_arredondamento_bilitool,
+    )
     link = gerar_link_bilitool(
         hv=hv,
         btc=btc,
         ig_sem_bilitool=ig_sem_bilitool,
         neuro=neuro,
     )
-    observacao = "" if ig_sem_bilitool is not None else "BiliTool não aplicável para IG <35s"
+
+    if ig_sem_bilitool is None:
+        observacao = "BiliTool não aplicável para IG <35s"
+    elif ig_arredondada_bilitool:
+        observacao = f"BiliTool: IG {ig_sem_bilitool}s por arredondamento de {ig}"
+    else:
+        observacao = ""
 
     return {
         "ordem": i,
@@ -969,6 +1018,10 @@ def montar_item(p, i, btc, data_avaliacao_str, hora_avaliacao):
         "percentil_txt": percentil_txt,
         "classificacao": classificacao,
         "class_ig": class_ig,
+        "ig_sem_bilitool": ig_sem_bilitool,
+        "ig_sem_ajustada_bilitool": ig_sem_ajustada_bilitool,
+        "ig_arredondada_bilitool": ig_arredondada_bilitool,
+        "modo_arredondamento_bilitool": modo_arredondamento_bilitool,
         "resumo": resumo,
         "link": link,
         "observacao": observacao,
@@ -1110,6 +1163,29 @@ with col_hora:
 
 data_avaliacao_str = data_avaliacao.strftime("%d/%m/%Y")
 
+st.markdown("### Ajuste opcional para consulta ao BiliTool")
+modo_arredondamento_label = st.radio(
+    "Arredondar idade gestacional apenas para o BiliTool",
+    options=[
+        "Não arredondar",
+        "Arredondar apenas 6 dias para a semana seguinte (ex.: 37+6 → 38)",
+        "Arredondar 5 ou 6 dias para a semana seguinte (ex.: 37+5/37+6 → 38)",
+    ],
+    index=0,
+    horizontal=False,
+    help=(
+        "Esse ajuste altera somente o parâmetro gestationalWeeks enviado ao BiliTool. "
+        "A IG original do prontuário, o percentil INTERGROWTH e a classificação gestacional permanecem inalterados."
+    ),
+)
+
+MAPA_MODO_ARREDONDAMENTO = {
+    "Não arredondar": "nenhum",
+    "Arredondar apenas 6 dias para a semana seguinte (ex.: 37+6 → 38)": "6_dias",
+    "Arredondar 5 ou 6 dias para a semana seguinte (ex.: 37+5/37+6 → 38)": "5_dias",
+}
+modo_arredondamento_bilitool = MAPA_MODO_ARREDONDAMENTO[modo_arredondamento_label]
+
 col1, col2 = st.columns([3, 1])
 with col1:
     texto_prontuario = st.text_area("Cole aqui os prontuários", height=260)
@@ -1149,7 +1225,14 @@ if extrair:
             dados = []
             for i, p in enumerate(pacientes, start=1):
                 btc = btcs[i - 1] if btcs else None
-                dados.append(montar_item(p, i, btc, data_avaliacao_str, hora_avaliacao))
+                dados.append(montar_item(
+                    p,
+                    i,
+                    btc,
+                    data_avaliacao_str,
+                    hora_avaliacao,
+                    modo_arredondamento_bilitool=modo_arredondamento_bilitool,
+                ))
 
             st.session_state.dados_conferencia = dados
             st.session_state.dados_resultado = []
@@ -1178,7 +1261,7 @@ if consultar:
         barra = st.progress(0)
         try:
             for idx, item in enumerate(dados, start=1):
-                ig_bt = semanas_bilitool(item["ig_sem"])
+                ig_bt = item.get("ig_sem_bilitool")
 
                 if ig_bt is None:
                     resultados.append({
